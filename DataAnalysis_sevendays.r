@@ -21,12 +21,15 @@ nc_hotel <- read.csv("nc_hotel_group.csv")
 # Q1. What does each outcome mean, and how is canceled coded? ----------------
 # Earlier output: 7,348 Canceled; 12,462 Check-Out; 190 No-Show.
 # Both Canceled and No-Show have canceled == 1.
-# The initial inspection commands below are currently commented out.
-glimpse(nc_hotel)
+# Count outcomes and inspect cancellation dates in separate pipelines.
+
+#glimpse(nc_hotel)
 
 nc_hotel |> 
   count(status, canceled)
-  filter(status == "Canceled") |> 
+
+nc_hotel |>
+  filter(status == "Canceled") |>
   select(status, status_date) |> 
   head()
 
@@ -193,8 +196,7 @@ nc_hotel |>
 
 # Q6. Which channels have the most lodging value attached to late cancels? ---
 # Updating nc_hotel did not update the separately created cancellations table.
-# Current filter below retains zero-night records: they add $0 but may affect
-# counts.
+# The filter below excludes zero-night records for the overnight-value analysis.
 cancellations <- cancellations |> 
   mutate(
     total_nights = weekend_stays + week_stays
@@ -202,14 +204,14 @@ cancellations <- cancellations |>
 
 late_cancellation_values <- cancellations |> 
   filter(
-    days_before_arrival >= 0 & days_before_arrival <= 7
+    days_before_arrival >= 0 & days_before_arrival <= 7 & total_nights > 0
   ) |> 
   mutate(
     booking_value = total_nights * average_daily_rate
   )
   
 
-late_cancellation_values |> 
+channel_value_summary <- late_cancellation_values |> 
   group_by(property, booking_channel) |> 
   summarise(
     late_cancellations = n(),
@@ -217,6 +219,8 @@ late_cancellation_values |>
     .groups = "drop"
   ) |> 
   arrange(desc(summed_booking))
+
+channel_value_summary
 
 # Q7a. What deposit terms do City Online TA late cancellations have? ----------
 # Earlier result: 312 No Deposit (~$117,143); 1 Non Refund (~$122).
@@ -280,3 +284,229 @@ deposit_comparison
 # 4. Choose a small set of charts, recommendations, and explicit limitations.
 #    Deposit effectiveness and a safe overbooking number are not established.
 # 5. Prepare reproducible analysis, <=10-slide PDF, and interview explanations.
+
+nc_hotel |>
+  filter(
+    property == "City Hotel",
+    booking_channel == "Online TA",
+    total_nights > 0
+  ) |>
+  select(advance_time) |> 
+  summary()
+
+
+# Select our segment and create booking lead-time groups
+city_online_bookings <- nc_hotel |>
+  filter(
+    property == "City Hotel",
+    booking_channel == "Online TA",
+    total_nights > 0
+  ) |>
+  mutate(
+    lead_time_group = case_when(
+      is.na(advance_time) ~ "Missing",
+      advance_time < 0 ~ "Invalid",
+      advance_time <= 7 ~ "0–7 days",
+      advance_time <= 30 ~ "8–30 days",
+      advance_time <= 90 ~ "31–90 days",
+      TRUE ~ "91+ days"
+    ),
+    lead_time_group = factor(
+      lead_time_group,
+      levels = c(
+        "0–7 days", "8–30 days", "31–90 days",
+        "91+ days", "Missing", "Invalid"
+      )
+    )
+  )
+
+# Check the number of bookings in each group
+city_online_bookings |>
+  count(lead_time_group, name = "all_bookings")
+
+city_online_bookings <- city_online_bookings |>
+  mutate(
+    status_date = ymd(status_date),
+    arrival_date = make_date(
+      year = arrival_year,
+      month = match(arrival_month, month.name),
+      day = arrival_day_of_month
+    ),
+    days_before_arrival = if_else(
+      status == "Canceled",
+      as.numeric(arrival_date - status_date),
+      NA_real_
+  )
+)
+
+lead_time_summary <- city_online_bookings |>
+  group_by(lead_time_group) |>
+  summarise(
+    all_bookings = n(),
+    actual_cancellations = sum(status == "Canceled", na.rm = TRUE),
+    late_3_days = sum(
+      status == "Canceled" &
+        days_before_arrival >= 0 & days_before_arrival <= 3,
+      na.rm = TRUE
+    ),
+    late_cancellations = sum(
+      status == "Canceled" &
+        days_before_arrival >= 0 & days_before_arrival <= 7,
+      na.rm = TRUE
+    ),
+    late_14_days = sum(
+      status == "Canceled" &
+        days_before_arrival >= 0 & days_before_arrival <= 14,
+      na.rm = TRUE
+    ),
+    .groups = "drop"
+  ) |>
+  mutate(
+    cancellation_rate = actual_cancellations / all_bookings * 100,
+    late_3_days_rate = late_3_days / all_bookings * 100,
+    late_cancellation_rate = late_cancellations / all_bookings * 100,
+    late_14_days_rate = late_14_days / all_bookings * 100
+  )
+
+lead_time_summary
+
+
+# List every column name
+names(nc_hotel)
+
+# Find columns whose names may describe guest counts
+guest_counts <- nc_hotel |>
+  select(matches("adult|child|bab|infant|guest", ignore.case = TRUE))
+
+# Inspect the selected column names and distributions
+names(guest_counts)
+summary(guest_counts)
+
+# Count missing values in each selected column
+guest_counts |>
+  summarise(
+    across(everything(), ~ sum(is.na(.x)))
+  )
+
+nc_hotel |> 
+  filter(num_adults == 0, num_children == 0) |> 
+  count(property, status)
+
+nc_hotel |> 
+  arrange(desc(num_adults)) |> 
+  select( property, booking_channel, num_adults, num_children, total_nights, average_daily_rate, status) |> 
+  head()
+
+late_cancellation_values |> 
+  filter(num_adults == 0, num_children == 0) |> 
+  select( property, booking_channel, num_adults, days_before_arrival, total_nights, booking_value)
+
+# Reshape the two rate columns for plotting
+lead_time_plot_data <- lead_time_summary |>
+  select(
+    lead_time_group,
+    cancellation_rate,
+    late_cancellation_rate
+  ) |>
+  pivot_longer(
+    cols = c(cancellation_rate, late_cancellation_rate),
+    names_to = "measure",
+    values_to = "rate"
+  ) |>
+  mutate(
+    measure = recode(
+      measure,
+      cancellation_rate = "All cancellations",
+      late_cancellation_rate = "Late cancellations (0–7 days)"
+    )
+  )
+
+# Compare the rates within each booking lead-time group
+ggplot(
+  lead_time_plot_data,
+  aes(x = lead_time_group, y = rate, fill = measure)
+) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7) +
+  geom_text(
+    aes(label = sprintf("%.1f%%", rate)),
+    position = position_dodge(width = 0.8),
+    vjust = -0.4,
+    size = 3.5
+  ) +
+  scale_fill_manual(
+    values = c(
+      "All cancellations" = "#526779",
+      "Late cancellations (0–7 days)" = "#C46532"
+    )
+  ) +
+  scale_y_continuous(
+    labels = scales::label_number(suffix = "%"),
+    expand = expansion(mult = c(0, 0.12))
+  ) +
+  labs(
+    title = "Earlier bookings cancel more often—but less often near arrival",
+    subtitle = "City Hotel · Online TA · Overnight bookings",
+    x = "Booking lead time",
+    y = "Percentage of all bookings in each group",
+    fill = NULL,
+    caption = "Late cancellations are a subset of all cancellations. No-shows are excluded from both numerators."
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "bottom",
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(face = "bold")
+  )
+
+# Q6 CHART. Where is estimated late-canceled booking value concentrated? -----
+# Reuse the saved Q6 summary; one bar represents one property/channel pair.
+# Zero-value categories remain visible through their labels and $0 annotations.
+channel_value_plot_data <- channel_value_summary |>
+  mutate(
+    channel_label = paste(property, booking_channel, sep = " | "),
+    highlight = property == "City Hotel" & booking_channel == "Online TA"
+  )
+
+channel_value_plot <- ggplot(
+  channel_value_plot_data,
+  aes(
+    x = summed_booking,
+    y = reorder(channel_label, summed_booking),
+    fill = highlight
+  )
+) +
+  geom_col(width = 0.7) +
+  geom_text(
+    aes(label = scales::dollar(summed_booking, accuracy = 1)),
+    hjust = -0.15,
+    size = 3.5
+  ) +
+  scale_fill_manual(
+    values = c("FALSE" = "#526779", "TRUE" = "#C46532"),
+    guide = "none"
+  ) +
+  scale_x_continuous(
+    labels = scales::label_dollar(),
+    expand = expansion(mult = c(0, 0.22))
+  ) +
+  labs(
+    title = "City Hotel Online TA leads in\nlate-canceled booking value",
+    subtitle = "Overnight bookings canceled 0–7 days before arrival",
+    x = "Estimated lodging value of late-canceled bookings ($)",
+    y = NULL,
+    caption = paste(
+      "Booking value = booked nights × average daily rate; not verified revenue loss.",
+      "Deposits and room resale are not accounted for. No-shows excluded.",
+      sep = "\n"
+    )
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(face = "bold"),
+    plot.caption = element_text(hjust = 0)
+  )
+
+print(channel_value_plot)
