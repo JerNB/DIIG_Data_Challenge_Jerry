@@ -422,7 +422,7 @@ lead_time_plot_data <- lead_time_summary |>
   )
 
 # Compare the rates within each booking lead-time group
-ggplot(
+lead_time_plot <- ggplot(
   lead_time_plot_data,
   aes(x = lead_time_group, y = rate, fill = measure)
 ) +
@@ -458,6 +458,8 @@ ggplot(
     panel.grid.minor = element_blank(),
     plot.title = element_text(face = "bold")
   )
+
+print(lead_time_plot)
 
 # Q6 CHART. Where is estimated late-canceled booking value concentrated? -----
 # Reuse the saved Q6 summary; one bar represents one property/channel pair.
@@ -510,3 +512,114 @@ channel_value_plot <- ggplot(
   )
 
 print(channel_value_plot)
+
+# Q3 CHART. Is the property difference just a matter of booking volume? ------
+# Use ALL recorded bookings, matching Q3 (including zero-night records).
+# Labels give numerator and denominator so the rate has visible context.
+property_plot_data <- booking_total |>
+  left_join(late_cancellation, by = "property") |>
+  replace_na(list(late_cancellations = 0L)) |>
+  mutate(
+    late_rate = late_cancellations / total_booking * 100,
+    bar_label = sprintf(
+      "%.2f%%\n%s of %s bookings",
+      late_rate,
+      scales::comma(late_cancellations),
+      scales::comma(total_booking)
+    )
+  )
+
+property_rate_plot <- ggplot(
+  property_plot_data, aes(x = property, y = late_rate, fill = property)
+) +
+  geom_col(width = 0.5, show.legend = FALSE) +
+  geom_text(aes(label = bar_label), vjust = -0.35, size = 4.5) +
+  scale_fill_manual(values = c("City Hotel" = "#C46532", "Resort Hotel" = "#526779")) +
+  scale_y_continuous(
+    labels = scales::label_number(suffix = "%"),
+    expand = expansion(mult = c(0, 0.3))
+  ) +
+  labs(
+    title = "City Hotel has a higher late-cancellation rate",
+    subtitle = "The difference remains after accounting for booking volume",
+    x = NULL,
+    y = "Late cancellations / all bookings",
+    caption = paste(
+      "Late = canceled 0-7 days before arrival. Denominator includes all recorded bookings.",
+      "No-shows are included in the denominator, but not the cancellation numerator.",
+      sep = "\n"
+    )
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(face = "bold"),
+    plot.caption = element_text(hjust = 0, size = 10)
+  )
+
+print(property_rate_plot)
+
+# SENSITIVITY CHART. Does the conclusion depend on defining late as 7 days? --
+# Each panel changes only the cancellation window; denominators and booking
+# lead-time groups stay fixed. Shared y-axis scales allow fair comparison.
+sensitivity_plot_data <- lead_time_summary |>
+  select(lead_time_group, all_bookings, late_3_days_rate,
+         late_cancellation_rate, late_14_days_rate) |>
+  pivot_longer(
+    cols = c(late_3_days_rate, late_cancellation_rate, late_14_days_rate),
+    names_to = "window", values_to = "rate"
+  ) |>
+  mutate(
+    window = factor(
+      window,
+      levels = c("late_3_days_rate", "late_cancellation_rate", "late_14_days_rate"),
+      labels = c("Within 3 days", "Within 7 days", "Within 14 days")
+    ),
+    shorter_lead = lead_time_group %in% c("0–7 days", "8–30 days")
+  )
+
+sensitivity_plot <- ggplot(
+  sensitivity_plot_data, aes(x = lead_time_group, y = rate, fill = shorter_lead)
+) +
+  geom_col(width = 0.7, show.legend = FALSE) +
+  geom_text(aes(label = sprintf("%.1f%%", rate)), vjust = -0.4, size = 3.7) +
+  facet_wrap(~ window, nrow = 1) +
+  scale_fill_manual(values = c("TRUE" = "#C46532", "FALSE" = "#526779")) +
+  scale_y_continuous(
+    labels = scales::label_number(suffix = "%"),
+    expand = expansion(mult = c(0, 0.16))
+  ) +
+  labs(
+    title = "Shorter-lead bookings have higher late-cancellation rates\nunder all three definitions",
+    subtitle = "City Hotel | Online TA | Overnight bookings",
+    x = "Booking lead time",
+    y = "Late cancellations / all bookings in each group",
+    caption = paste(
+      "Group sizes (left to right): 803, 1,289, 1,936, 2,363. All windows include arrival day.",
+      "Shorter-lead bookings have less opportunity to cancel early; these comparisons are descriptive.",
+      sep = "\n"
+    )
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(face = "bold"),
+    strip.text = element_text(face = "bold"),
+    plot.caption = element_text(hjust = 0, size = 10)
+  )
+
+print(sensitivity_plot)
+
+# EXPORT. Explicit plot arguments prevent saving the wrong last-displayed plot.
+# PNG files are ready to insert into slides; rerunning updates these files.
+dir.create("figures", showWarnings = FALSE)
+ggsave("figures/01_property_late_rates.png", property_rate_plot,
+       width = 11, height = 6.5, dpi = 300, bg = "white")
+ggsave("figures/02_channel_booking_value.png", channel_value_plot,
+       width = 12, height = 8, dpi = 300, bg = "white")
+ggsave("figures/03_lead_time_rates.png", lead_time_plot,
+       width = 12, height = 7, dpi = 300, bg = "white")
+ggsave("figures/04_window_sensitivity.png", sensitivity_plot,
+       width = 13, height = 7, dpi = 300, bg = "white")
