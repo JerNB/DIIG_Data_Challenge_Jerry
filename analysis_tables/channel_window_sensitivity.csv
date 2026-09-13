@@ -1,0 +1,40 @@
+window_days,property,booking_channel,late_cancellations,summed_booking_value,value_rank
+3,City Hotel,Aviation,5,697,11
+3,City Hotel,Complementary,6,0,12
+3,City Hotel,Corporate,26,3253.34,9
+3,City Hotel,Direct,41,11673.35,3
+3,City Hotel,Groups,61,12365.65,2
+3,City Hotel,Offline TA/TO,47,10635.89,5
+3,City Hotel,Online TA,137,52502.7,1
+3,Resort Hotel,Complementary,2,0,12
+3,Resort Hotel,Corporate,22,3054.65,10
+3,Resort Hotel,Direct,25,5969.08,6
+3,Resort Hotel,Groups,17,3607,8
+3,Resort Hotel,Offline TA/TO,13,5211.28,7
+3,Resort Hotel,Online TA,43,11292.08,4
+7,City Hotel,Aviation,6,917,11
+7,City Hotel,Complementary,6,0,12
+7,City Hotel,Corporate,43,6386.34,9
+7,City Hotel,Direct,54,15318,6
+7,City Hotel,Groups,117,21343.42,3
+7,City Hotel,Offline TA/TO,101,20098.4,4
+7,City Hotel,Online TA,313,117265.03,1
+7,Resort Hotel,Complementary,4,0,12
+7,Resort Hotel,Corporate,31,4340.1,10
+7,Resort Hotel,Direct,40,15523.97,5
+7,Resort Hotel,Groups,48,8764.8,7
+7,Resort Hotel,Offline TA/TO,18,8225.2,8
+7,Resort Hotel,Online TA,70,27154.91,2
+14,City Hotel,Aviation,6,917,11
+14,City Hotel,Complementary,7,0,12
+14,City Hotel,Corporate,50,7822.34,9
+14,City Hotel,Direct,72,23326.11,6
+14,City Hotel,Groups,172,33708.44,5
+14,City Hotel,Offline TA/TO,163,34191.17,4
+14,City Hotel,Online TA,549,215504.09,1
+14,Resort Hotel,Complementary,5,0,12
+14,Resort Hotel,Corporate,36,5352.2,10
+14,Resort Hotel,Direct,60,35082.52,3
+14,Resort Hotel,Groups,75,14031.97,8
+14,Resort Hotel,Offline TA/TO,34,15363.05,7
+14,Resort Hotel,Online TA,174,86649.5,2

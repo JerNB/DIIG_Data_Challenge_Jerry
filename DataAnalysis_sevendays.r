@@ -623,3 +623,5 @@ ggsave("figures/03_lead_time_rates.png", lead_time_plot,
        width = 12, height = 7, dpi = 300, bg = "white")
 ggsave("figures/04_window_sensitivity.png", sensitivity_plot,
        width = 13, height = 7, dpi = 300, bg = "white")
+
+

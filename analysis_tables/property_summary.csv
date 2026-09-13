@@ -1,0 +1,3 @@
+property,all_bookings,cancellations,late_cancellations,cancellation_rate_pct,late_share_of_cancellations_pct,late_rate_all_bookings_pct
+City Hotel,13203,5491,642,41.58903279557676,11.69185940630122,4.862531242899341
+Resort Hotel,6797,1857,211,27.320876857437106,11.362412493268714,3.104310725319994

@@ -1,0 +1,665 @@
+---
+title: "NC Hotel Group: Late Cancellation Analysis"
+subtitle: "Where are late cancellations concentrated, and what evidence can guide a targeted response?"
+format:
+  html:
+    toc: true
+    toc-depth: 2
+    number-sections: true
+    code-fold: false
+    code-tools: true
+    embed-resources: true
+    theme: cosmo
+execute:
+  echo: true
+  warning: false
+  message: false
+  error: false
+  cache: false
+fig-width: 10
+fig-height: 6
+---
+
+## What data and definitions will we use?
+
+One row represents one booking. **Late cancellation** means `status == "Canceled"` with 0-7 days of notice, including arrival day. No-shows remain a separate outcome. Booking value is booked nights x average daily rate, not verified revenue loss.
+
+```{r}
+#| label: setup
+library(tidyverse)
+library(lubridate)
+
+nc_hotel_raw <- read_csv("nc_hotel_group.csv", show_col_types = FALSE)
+
+# Stop if the input no longer contains the variables needed below.
+required_columns <- c(
+  "property", "status", "canceled", "status_date", "arrival_year",
+  "arrival_month", "arrival_day_of_month", "booking_channel",
+  "weekend_stays", "week_stays", "average_daily_rate", "deposit_terms",
+  "advance_time", "num_adults", "num_children"
+)
+stopifnot(all(required_columns %in% names(nc_hotel_raw)))
+
+# Display full tables with rounded numbers; calculations retain full precision.
+show_table <- function(data, caption = NULL, digits = 2) {
+  knitr::kable(data, caption = caption, digits = digits)
+}
+
+theme_set(theme_minimal(base_size = 12))
+theme_update(
+  panel.grid.minor = element_blank(),
+  plot.title = element_text(face = "bold"),
+  plot.caption = element_text(hjust = 0),
+  legend.position = "bottom"
+)
+accent <- "#C46532"
+neutral <- "#526779"
+
+tibble(
+  bookings = nrow(nc_hotel_raw),
+  variables = ncol(nc_hotel_raw)
+) |> show_table()
+
+# Inspect structure without printing individual booking records in full.
+glimpse(nc_hotel_raw)
+```
+
+## How are booking outcomes coded?
+
+```{r}
+#| label: booking-outcomes
+outcome_summary <- nc_hotel_raw |>
+  count(status, canceled, name = "bookings") |>
+  mutate(share_pct = 100 * bookings / sum(bookings))
+
+outcome_summary |> show_table()
+
+# The binary flag includes no-shows; use status for actual cancellations.
+stopifnot(all(
+  nc_hotel_raw$canceled ==
+    as.integer(nc_hotel_raw$status %in% c("Canceled", "No-Show"))
+))
+
+nc_hotel_raw |>
+  filter(status == "Canceled") |>
+  select(status, status_date) |>
+  slice_head(n = 6) |>
+  show_table(caption = "Example cancellation dates before conversion")
+```
+
+## How far before arrival do cancellations occur?
+
+`status_date` is used as the cancellation date only for canceled bookings. Booking lead time (`advance_time`) is a different measure: booking to arrival.
+
+```{r}
+#| label: derive-analysis-variables
+# Derive variables once so every later subset uses the same definitions.
+nc_hotel <- nc_hotel_raw |>
+  mutate(
+    status_date = ymd(status_date),
+    arrival_date = make_date(
+      arrival_year, match(arrival_month, month.name), arrival_day_of_month
+    ),
+    actual_cancellation = status == "Canceled",
+    days_before_arrival = if_else(
+      actual_cancellation,
+      as.numeric(arrival_date - status_date),
+      NA_real_
+    ),
+    total_nights = weekend_stays + week_stays,
+    booking_value = total_nights * average_daily_rate,
+    zero_recorded_guests = num_adults == 0 & num_children == 0
+  )
+
+cancellations <- nc_hotel |> filter(actual_cancellation)
+
+cancellations |>
+  select(arrival_date, status_date, days_before_arrival) |>
+  slice_head(n = 6) |>
+  show_table()
+
+notice_audit <- cancellations |>
+  summarise(
+    cancellations = n(),
+    missing_notice = sum(is.na(days_before_arrival)),
+    negative_notice = sum(days_before_arrival < 0, na.rm = TRUE),
+    same_day = sum(days_before_arrival == 0, na.rm = TRUE),
+    notice_exceeds_booking_lead = sum(
+      days_before_arrival > advance_time, na.rm = TRUE
+    )
+  )
+notice_audit |> show_table()
+
+cancellations |>
+  filter(is.na(days_before_arrival) | days_before_arrival < 0) |>
+  select(property, arrival_date, status_date, days_before_arrival) |>
+  show_table(caption = "Missing or negative cancellation notice: records requiring review")
+
+summary(cancellations$days_before_arrival)
+
+# All-cancellation denominators below require known, nonnegative notice.
+# Fail visibly if a future input would silently classify unknown timing as early.
+stopifnot(
+  notice_audit$missing_notice == 0,
+  notice_audit$negative_notice == 0
+)
+
+is_late <- function(status, notice, window = 7) {
+  status == "Canceled" & !is.na(notice) & between(notice, 0, window)
+}
+nc_hotel <- nc_hotel |>
+  mutate(late_cancellation = is_late(status, days_before_arrival))
+cancellations <- nc_hotel |> filter(actual_cancellation)
+
+notice_distribution <- cancellations |>
+  mutate(notice_group = cut(
+    days_before_arrival,
+    breaks = c(-Inf, 0, 3, 7, 14, 30, 90, Inf),
+    labels = c("Arrival day", "1-3 days", "4-7 days", "8-14 days",
+               "15-30 days", "31-90 days", "91+ days")
+  )) |>
+  count(notice_group, .drop = FALSE, name = "cancellations") |>
+  mutate(share_pct = 100 * cancellations / sum(cancellations))
+notice_distribution |> show_table()
+
+overall_summary <- nc_hotel |>
+  summarise(
+    all_bookings = n(),
+    cancellations = sum(actual_cancellation),
+    late_cancellations = sum(late_cancellation),
+    late_share_of_cancellations_pct = 100 * late_cancellations / cancellations,
+    late_rate_all_bookings_pct = 100 * late_cancellations / all_bookings
+  )
+overall_summary |> show_table()
+```
+
+## Are stay lengths, rates, guest counts, and categories usable?
+
+All recorded bookings remain in the main frequency analysis. Value, deposit, and lead-time analyses use overnight bookings (`total_nights > 0`); zero rates are retained. Records with no adults or children recorded are flagged and checked separately.
+
+```{r}
+#| label: data-quality
+nc_hotel_raw |>
+  summarise(across(everything(), ~ sum(is.na(.x)))) |>
+  pivot_longer(everything(), names_to = "variable", values_to = "missing") |>
+  show_table(caption = "Missing values in the original data")
+
+quality_summary <- nc_hotel |>
+  summarise(
+    zero_nights = sum(total_nights == 0, na.rm = TRUE),
+    missing_nights = sum(is.na(total_nights)),
+    negative_stay_components = sum(weekend_stays < 0 | week_stays < 0, na.rm = TRUE),
+    zero_rates = sum(average_daily_rate == 0, na.rm = TRUE),
+    negative_rates = sum(average_daily_rate < 0, na.rm = TRUE),
+    missing_rates = sum(is.na(average_daily_rate)),
+    zero_recorded_guests = sum(zero_recorded_guests, na.rm = TRUE),
+    missing_guest_counts = sum(is.na(num_adults) | is.na(num_children)),
+    negative_guest_counts = sum(num_adults < 0 | num_children < 0, na.rm = TRUE),
+    missing_lead_time = sum(is.na(advance_time)),
+    negative_lead_time = sum(advance_time < 0, na.rm = TRUE)
+  )
+quality_summary |>
+  pivot_longer(everything(), names_to = "check", values_to = "bookings") |>
+  show_table()
+
+nc_hotel |>
+  select(total_nights, average_daily_rate, num_adults, num_children, advance_time) |>
+  summary()
+
+nc_hotel |>
+  filter(total_nights == 0) |>
+  count(property, status) |>
+  show_table(caption = "Zero-night bookings")
+
+nc_hotel |>
+  filter(zero_recorded_guests) |>
+  count(property, status) |>
+  show_table(caption = "Bookings with no adults or children recorded")
+
+nc_hotel |>
+  arrange(desc(average_daily_rate)) |>
+  select(property, status, total_nights, average_daily_rate) |>
+  slice_head(n = 6) |>
+  show_table(caption = "Highest daily rates: inspect, do not automatically delete")
+
+nc_hotel |>
+  arrange(desc(num_adults)) |>
+  select(property, booking_channel, num_adults, num_children,
+         total_nights, average_daily_rate, status) |>
+  slice_head(n = 6) |>
+  show_table(caption = "Largest recorded adult counts")
+
+nc_hotel |>
+  select(property, status, booking_channel, deposit_terms) |>
+  pivot_longer(everything(), names_to = "variable", values_to = "category") |>
+  mutate(needs_review = is.na(category) |
+           str_to_lower(str_trim(category)) %in% c("", "undefined", "unknown")) |>
+  count(variable, category, needs_review) |>
+  show_table(caption = "Category coverage and missing or undefined labels")
+
+# Protect booking-value totals from silently dropping missing/negative inputs.
+stopifnot(
+  quality_summary$missing_nights == 0,
+  quality_summary$negative_stay_components == 0,
+  quality_summary$missing_rates == 0,
+  quality_summary$negative_rates == 0
+)
+```
+
+## Does late-cancellation frequency differ by property?
+
+The late share among cancellations and the late rate among all bookings answer different questions. All-booking denominators include no-shows and zero-night records.
+
+```{r}
+#| label: property-comparison
+property_summary <- nc_hotel |>
+  group_by(property) |>
+  summarise(
+    all_bookings = n(),
+    cancellations = sum(actual_cancellation),
+    late_cancellations = sum(late_cancellation),
+    .groups = "drop"
+  ) |>
+  mutate(
+    cancellation_rate_pct = 100 * cancellations / all_bookings,
+    late_share_of_cancellations_pct = 100 * late_cancellations / cancellations,
+    late_rate_all_bookings_pct = 100 * late_cancellations / all_bookings
+  )
+property_summary |> show_table()
+```
+
+```{r}
+#| label: fig-property-rates
+#| fig-cap: "Late cancellations as a percentage of all recorded bookings at each property."
+property_rate_plot <- property_summary |>
+  mutate(label = sprintf(
+    "%.2f%%\n%s of %s bookings", late_rate_all_bookings_pct,
+    scales::comma(late_cancellations), scales::comma(all_bookings)
+  )) |>
+  ggplot(aes(property, late_rate_all_bookings_pct, fill = property)) +
+  geom_col(width = 0.5, show.legend = FALSE) +
+  geom_text(aes(label = label), vjust = -0.35, size = 4) +
+  scale_fill_manual(values = c("City Hotel" = accent, "Resort Hotel" = neutral)) +
+  scale_y_continuous(labels = scales::label_number(suffix = "%"),
+                     expand = expansion(mult = c(0, 0.3))) +
+  labs(title = "Late-cancellation rates by property", x = NULL,
+       y = "Late cancellations / all bookings",
+       caption = "Late = canceled 0-7 days before arrival. No-shows excluded from numerator.")
+property_rate_plot
+```
+
+## Which property and channel combinations contribute the most late cancellations?
+
+```{r}
+#| label: channel-frequency
+channel_summary <- nc_hotel |>
+  group_by(property, booking_channel) |>
+  summarise(
+    all_bookings = n(),
+    cancellations = sum(actual_cancellation),
+    late_cancellations = sum(late_cancellation),
+    .groups = "drop"
+  ) |>
+  mutate(
+    late_rate_pct = 100 * late_cancellations / all_bookings,
+    share_of_all_late_pct = 100 * late_cancellations / sum(late_cancellations)
+  ) |>
+  arrange(desc(late_cancellations))
+
+# Counts show scale; rates use each channel's own booking denominator.
+channel_summary |> show_table()
+```
+
+## Where is late-canceled booking value concentrated?
+
+These totals exclude zero-night stays. They do not account for deposits collected, cancellation fees, room resale, or operating costs. Values use the daily-rate units in the source data.
+
+```{r}
+#| label: booking-value
+overnight_bookings <- nc_hotel |> filter(total_nights > 0)
+late_cancellation_values <- overnight_bookings |> filter(late_cancellation)
+
+nc_hotel |>
+  summarise(
+    all_bookings = n(),
+    overnight_bookings = sum(total_nights > 0),
+    all_late_cancellations = sum(late_cancellation),
+    zero_night_late_cancellations = sum(late_cancellation & total_nights == 0),
+    overnight_late_cancellations = sum(late_cancellation & total_nights > 0)
+  ) |>
+  show_table(caption = "Reconcile all-booking and overnight-only populations")
+
+channel_value_summary <- late_cancellation_values |>
+  group_by(property, booking_channel) |>
+  summarise(
+    late_cancellations = n(),
+    booked_nights = sum(total_nights),
+    summed_booking_value = sum(booking_value),
+    mean_booking_value = mean(booking_value),
+    median_booking_value = median(booking_value),
+    .groups = "drop"
+  ) |>
+  mutate(value_share_pct = 100 * summed_booking_value / sum(summed_booking_value)) |>
+  arrange(desc(summed_booking_value))
+channel_value_summary |> show_table()
+
+late_cancellation_values |>
+  filter(zero_recorded_guests) |>
+  select(property, booking_channel, num_adults, num_children,
+         days_before_arrival, total_nights, booking_value) |>
+  show_table(caption = "Late-canceled overnight bookings with no recorded guests")
+```
+
+```{r}
+#| label: fig-channel-value
+#| fig-height: 7
+#| fig-cap: "Booked lodging value attached to late cancellations, by property and channel."
+channel_value_plot <- channel_value_summary |>
+  mutate(
+    channel_label = paste(property, booking_channel, sep = " | "),
+    highlight = property == "City Hotel" & booking_channel == "Online TA"
+  ) |>
+  ggplot(aes(summed_booking_value, reorder(channel_label, summed_booking_value),
+             fill = highlight)) +
+  geom_col(width = 0.7) +
+  geom_text(aes(label = scales::comma(summed_booking_value, accuracy = 1)),
+            hjust = -0.15, size = 3.5) +
+  scale_fill_manual(values = c("FALSE" = neutral, "TRUE" = accent), guide = "none") +
+  scale_x_continuous(labels = scales::label_comma(),
+                     expand = expansion(mult = c(0, 0.25))) +
+  labs(title = "Late-canceled booking value by property and channel",
+       subtitle = "Overnight bookings canceled 0-7 days before arrival",
+       x = "Booked lodging value (source daily-rate units)", y = NULL,
+       caption = "Nights x average daily rate; not verified revenue loss. Deposits and room resale unobserved.")
+channel_value_plot
+```
+
+## What do deposit terms tell us about City Hotel Online TA bookings?
+
+Both the numerator and denominator below use overnight bookings in this segment. Deposit terms describe the reservation, not proof of payment; small deposit groups cannot establish deposit effectiveness.
+
+```{r}
+#| label: deposit-comparison
+city_online_bookings <- overnight_bookings |>
+  filter(property == "City Hotel", booking_channel == "Online TA")
+
+city_online_bookings |>
+  filter(late_cancellation) |>
+  group_by(deposit_terms) |>
+  summarise(
+    late_cancellations = n(),
+    summed_booking_value = sum(booking_value),
+    .groups = "drop"
+  ) |>
+  show_table(caption = "Deposit terms among late cancellations")
+
+deposit_comparison <- city_online_bookings |>
+  group_by(deposit_terms) |>
+  summarise(
+    all_bookings = n(),
+    late_cancellations = sum(late_cancellation),
+    .groups = "drop"
+  ) |>
+  mutate(late_rate_pct = 100 * late_cancellations / all_bookings)
+deposit_comparison |> show_table(caption = "Late-cancellation rate within each deposit category")
+```
+
+## Does booking lead time distinguish cancellation patterns in this segment?
+
+Rates use all overnight bookings within each lead-time group. Late cancellations are a subset of all cancellations; short-lead bookings have less opportunity to cancel early.
+
+```{r}
+#| label: lead-time-comparison
+summary(city_online_bookings$advance_time)
+
+city_online_bookings <- city_online_bookings |>
+  mutate(
+    lead_time_group = case_when(
+      is.na(advance_time) ~ "Missing",
+      advance_time < 0 ~ "Invalid",
+      advance_time <= 7 ~ "0-7 days",
+      advance_time <= 30 ~ "8-30 days",
+      advance_time <= 90 ~ "31-90 days",
+      TRUE ~ "91+ days"
+    ),
+    lead_time_group = factor(lead_time_group, levels = c(
+      "0-7 days", "8-30 days", "31-90 days", "91+ days", "Missing", "Invalid"
+    ))
+  )
+
+lead_time_summary <- city_online_bookings |>
+  group_by(lead_time_group) |>
+  summarise(
+    all_bookings = n(),
+    cancellations = sum(actual_cancellation),
+    late_3_days = sum(is_late(status, days_before_arrival, 3)),
+    late_7_days = sum(late_cancellation),
+    late_14_days = sum(is_late(status, days_before_arrival, 14)),
+    .groups = "drop"
+  ) |>
+  mutate(
+    cancellation_rate_pct = 100 * cancellations / all_bookings,
+    late_3_days_rate = 100 * late_3_days / all_bookings,
+    late_7_days_rate = 100 * late_7_days / all_bookings,
+    late_14_days_rate = 100 * late_14_days / all_bookings
+  )
+lead_time_summary |> show_table()
+```
+
+```{r}
+#| label: fig-lead-time
+#| fig-cap: "All-cancellation and late-cancellation rates within City Hotel Online TA lead-time groups."
+lead_time_plot_data <- lead_time_summary |>
+  select(lead_time_group, cancellation_rate_pct, late_7_days_rate) |>
+  pivot_longer(-lead_time_group, names_to = "measure", values_to = "rate") |>
+  mutate(measure = recode(measure,
+    cancellation_rate_pct = "All cancellations",
+    late_7_days_rate = "Late cancellations (0-7 days)"
+  ))
+
+lead_time_plot <- ggplot(lead_time_plot_data,
+                         aes(lead_time_group, rate, fill = measure)) +
+  geom_col(position = position_dodge(0.8), width = 0.7) +
+  geom_text(aes(label = sprintf("%.1f%%", rate)),
+            position = position_dodge(0.8), vjust = -0.4, size = 3.5) +
+  scale_fill_manual(values = c("All cancellations" = neutral,
+                               "Late cancellations (0-7 days)" = accent)) +
+  scale_y_continuous(labels = scales::label_number(suffix = "%"),
+                     expand = expansion(mult = c(0, 0.15))) +
+  labs(title = "Cancellation patterns by booking lead time",
+       subtitle = "City Hotel | Online TA | Overnight bookings",
+       x = "Booking lead time", y = "Percentage of bookings in each group", fill = NULL,
+       caption = "No-shows excluded from both numerators. Late cancellations are a subset of all cancellations.")
+lead_time_plot
+```
+
+## Do the findings depend on the late window or inclusion rules?
+
+Each window includes arrival day and uses a fixed denominator. The guest-count check removes flagged bookings from both numerator and denominator.
+
+```{r}
+#| label: window-sensitivity
+# Recheck property rates and channel value rankings, not just lead-time groups.
+window_data <- map_dfr(c(3, 7, 14), function(window) {
+  nc_hotel |>
+    mutate(window_days = window,
+           late_in_window = is_late(status, days_before_arrival, window))
+})
+
+property_window_summary <- window_data |>
+  group_by(window_days, property) |>
+  summarise(all_bookings = n(), late_cancellations = sum(late_in_window),
+            .groups = "drop") |>
+  mutate(late_rate_pct = 100 * late_cancellations / all_bookings)
+property_window_summary |> show_table()
+
+channel_window_summary <- window_data |>
+  filter(total_nights > 0, late_in_window) |>
+  group_by(window_days, property, booking_channel) |>
+  summarise(late_cancellations = n(), summed_booking_value = sum(booking_value),
+            .groups = "drop") |>
+  group_by(window_days) |>
+  mutate(value_rank = min_rank(desc(summed_booking_value))) |>
+  ungroup()
+channel_window_summary |>
+  filter(value_rank <= 3) |>
+  arrange(window_days, value_rank) |>
+  show_table(caption = "Top three property/channel groups by booking value under each window")
+```
+
+```{r}
+#| label: fig-window-sensitivity
+#| fig-width: 12
+#| fig-cap: "Late-cancellation rates under 3-, 7-, and 14-day definitions, with fixed lead-time group denominators."
+sensitivity_plot_data <- lead_time_summary |>
+  select(lead_time_group, late_3_days_rate, late_7_days_rate, late_14_days_rate) |>
+  pivot_longer(-lead_time_group, names_to = "window", values_to = "rate") |>
+  mutate(
+    window = factor(window,
+      levels = c("late_3_days_rate", "late_7_days_rate", "late_14_days_rate"),
+      labels = c("Within 3 days", "Within 7 days", "Within 14 days")),
+    shorter_lead = lead_time_group %in% c("0-7 days", "8-30 days")
+  )
+
+group_size_caption <- paste(
+  paste(lead_time_summary$lead_time_group,
+        scales::comma(lead_time_summary$all_bookings), sep = ": n = "),
+  collapse = "; "
+)
+
+sensitivity_plot <- ggplot(sensitivity_plot_data,
+                            aes(lead_time_group, rate, fill = shorter_lead)) +
+  geom_col(width = 0.7, show.legend = FALSE) +
+  geom_text(aes(label = sprintf("%.1f%%", rate)), vjust = -0.4, size = 3.3) +
+  facet_wrap(~ window, nrow = 1) +
+  scale_fill_manual(values = c("TRUE" = accent, "FALSE" = neutral)) +
+  scale_y_continuous(labels = scales::label_number(suffix = "%"),
+                     expand = expansion(mult = c(0, 0.2))) +
+  labs(title = "Does the late-cancellation pattern change with the window?",
+       subtitle = "City Hotel | Online TA | Overnight bookings",
+       x = "Booking lead time", y = "Late cancellations / bookings in each group",
+       caption = paste(group_size_caption,
+         "Shorter-lead bookings have less opportunity to cancel early; comparisons are descriptive.",
+         sep = "\n")) +
+  theme(axis.text.x = element_text(size = 9))
+sensitivity_plot
+```
+
+```{r}
+#| label: inclusion-sensitivity
+inclusion_data <- bind_rows(
+  nc_hotel |> mutate(population = "All recorded bookings"),
+  overnight_bookings |> mutate(population = "Overnight bookings"),
+  overnight_bookings |>
+    filter(!is.na(zero_recorded_guests), !zero_recorded_guests) |>
+    mutate(population = "Overnight, recorded guests > 0")
+)
+
+inclusion_data |>
+  group_by(population, property) |>
+  summarise(
+    all_bookings = n(),
+    late_cancellations = sum(late_cancellation),
+    late_rate_pct = 100 * late_cancellations / all_bookings,
+    .groups = "drop"
+  ) |>
+  show_table(caption = "Property rates under different inclusion rules")
+
+inclusion_data |>
+  filter(total_nights > 0, late_cancellation) |>
+  group_by(population, property, booking_channel) |>
+  summarise(summed_booking_value = sum(booking_value), .groups = "drop") |>
+  group_by(population) |>
+  slice_max(summed_booking_value, n = 1, with_ties = TRUE) |>
+  ungroup() |>
+  show_table(caption = "Highest-value segment under each inclusion rule")
+
+inclusion_data |>
+  filter(property == "City Hotel", booking_channel == "Online TA") |>
+  group_by(population) |>
+  summarise(
+    all_bookings = n(),
+    late_cancellations = sum(late_cancellation),
+    late_rate_pct = 100 * late_cancellations / all_bookings,
+    late_booking_value = sum(booking_value[late_cancellation]),
+    .groups = "drop"
+  ) |>
+  show_table(caption = "Effect of inclusion rules on the selected segment")
+```
+
+## What evidence should guide the presentation and next action?
+
+```{r}
+#| label: evidence-summary
+priority_segment <- channel_value_summary |> slice_max(summed_booking_value, n = 1)
+
+tibble(
+  question = c(
+    "How common are late cancellations?",
+    "Which property has the higher all-booking late rate?",
+    "Which segment has the most late-canceled booking value?"
+  ),
+  answer = c(
+    sprintf("%s of %s bookings (%.2f%%); %.2f%% of cancellations",
+      scales::comma(overall_summary$late_cancellations),
+      scales::comma(overall_summary$all_bookings),
+      overall_summary$late_rate_all_bookings_pct,
+      overall_summary$late_share_of_cancellations_pct),
+    property_summary |>
+      slice_max(late_rate_all_bookings_pct, n = 1, with_ties = FALSE) |>
+      transmute(answer = sprintf("%s: %.2f%%", property, late_rate_all_bookings_pct)) |>
+      pull(answer),
+    sprintf("%s | %s: %s (%.1f%% of total late booking value)",
+      priority_segment$property, priority_segment$booking_channel,
+      scales::comma(priority_segment$summed_booking_value, accuracy = 0.01),
+      priority_segment$value_share_pct)
+  )
+) |> show_table()
+```
+
+Prioritize a measured follow-up in the highest-value segment and test pre-arrival communication, using the lead-time results to plan the pilot. These descriptive results do not establish a causal effect of deposits or lead time, actual revenue loss, or a safe overbooking number.
+
+## How can the results be reproduced and reused in slides?
+
+Render this file from the project folder with `quarto render Report.qmd`. The code below saves the four charts and key tables for a separate presentation.
+
+```{r}
+#| label: export-results
+dir.create("figures", showWarnings = FALSE)
+dir.create("analysis_tables", showWarnings = FALSE)
+
+ggsave("figures/01_property_late_rates.png", property_rate_plot,
+       width = 11, height = 6.5, dpi = 300, bg = "white")
+ggsave("figures/02_channel_booking_value.png", channel_value_plot,
+       width = 12, height = 8, dpi = 300, bg = "white")
+ggsave("figures/03_lead_time_rates.png", lead_time_plot,
+       width = 12, height = 7, dpi = 300, bg = "white")
+ggsave("figures/04_window_sensitivity.png", sensitivity_plot,
+       width = 13, height = 7, dpi = 300, bg = "white")
+
+write_csv(property_summary, "analysis_tables/property_summary.csv")
+write_csv(channel_summary, "analysis_tables/channel_frequency.csv")
+write_csv(channel_value_summary, "analysis_tables/channel_booking_value.csv")
+write_csv(deposit_comparison, "analysis_tables/deposit_comparison.csv")
+write_csv(lead_time_summary, "analysis_tables/lead_time_summary.csv")
+write_csv(property_window_summary, "analysis_tables/property_window_sensitivity.csv")
+write_csv(channel_window_summary, "analysis_tables/channel_window_sensitivity.csv")
+
+# Reconciliation checks tie every subgroup back to its source population.
+stopifnot(
+  sum(property_summary$all_bookings) == nrow(nc_hotel),
+  sum(channel_summary$late_cancellations) == sum(nc_hotel$late_cancellation),
+  sum(channel_value_summary$late_cancellations) == nrow(late_cancellation_values),
+  sum(deposit_comparison$all_bookings) == nrow(city_online_bookings),
+  sum(lead_time_summary$all_bookings) == nrow(city_online_bookings),
+  all(lead_time_summary$late_3_days <= lead_time_summary$late_7_days),
+  all(lead_time_summary$late_7_days <= lead_time_summary$late_14_days),
+  all(lead_time_summary$late_14_days <= lead_time_summary$cancellations)
+)
+```
+
+```{r}
+#| label: session-information
+#| code-fold: true
+sessionInfo()
+```
